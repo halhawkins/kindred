@@ -10,6 +10,7 @@ export type MindMapNode = {
 
 export type MindMapImage = {
   id: string
+  parentId: string
   name: string
   dataUrl: string
   x: number

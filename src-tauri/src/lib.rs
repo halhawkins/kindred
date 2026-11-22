@@ -33,6 +33,8 @@ struct MindMapDocument {
 #[serde(rename_all = "camelCase")]
 struct MindMapImage {
     id: String,
+    #[serde(default)]
+    parent_id: Option<String>,
     name: String,
     data_url: String,
     x: f64,
@@ -74,7 +76,7 @@ fn validate_document(document: &MindMapDocument) -> Result<(), String> {
         return Err("A mind map can contain at most 10 images.".into());
     }
 
-    let mut ids = HashSet::with_capacity(document.nodes.len());
+    let mut ids = HashSet::with_capacity(document.nodes.len() + document.images.len());
     let mut children = HashMap::<&str, Vec<&str>>::new();
     for node in &document.nodes {
         if node.id.is_empty() || !ids.insert(node.id.as_str()) {
@@ -99,32 +101,10 @@ fn validate_document(document: &MindMapDocument) -> Result<(), String> {
     if roots.len() != 1 {
         return Err("A mind map must have exactly one root idea.".into());
     }
-    if document.nodes.iter().any(|node| {
-        node.parent_id
-            .as_ref()
-            .is_some_and(|parent_id| !ids.contains(parent_id.as_str()))
-    }) {
-        return Err("Every idea must connect to an existing parent.".into());
-    }
-    let mut reachable = HashSet::with_capacity(document.nodes.len());
-    let mut pending = vec![roots[0].id.as_str()];
-    while let Some(id) = pending.pop() {
-        if !reachable.insert(id) {
-            continue;
-        }
-        if let Some(descendants) = children.get(id) {
-            pending.extend(descendants.iter().copied());
-        }
-    }
-    if reachable.len() != document.nodes.len() {
-        return Err("Every idea must be connected to the root idea.".into());
-    }
-
-    let mut image_ids = HashSet::with_capacity(document.images.len());
     let mut total_image_data = 0;
     for image in &document.images {
-        if image.id.is_empty() || !image_ids.insert(image.id.as_str()) {
-            return Err("Mind map image IDs must be unique and non-empty.".into());
+        if image.id.is_empty() || !ids.insert(image.id.as_str()) {
+            return Err("Mind map entity IDs must be unique and non-empty.".into());
         }
         if image.name.len() > 480
             || image.width <= 0.0
@@ -138,6 +118,11 @@ fn validate_document(document: &MindMapDocument) -> Result<(), String> {
         {
             return Err("A mind map image has invalid dimensions or position.".into());
         }
+        let parent_id = image
+            .parent_id
+            .as_deref()
+            .ok_or("Every image must connect to a parent idea.")?;
+        children.entry(parent_id).or_default().push(&image.id);
         let Some((mime, payload)) = image.data_url.split_once(',') else {
             return Err("A mind map image has invalid image data.".into());
         };
@@ -153,6 +138,32 @@ fn validate_document(document: &MindMapDocument) -> Result<(), String> {
         }
         total_image_data += image.data_url.len();
     }
+    if document.nodes.iter().any(|node| {
+        node.parent_id
+            .as_ref()
+            .is_some_and(|parent_id| !ids.contains(parent_id.as_str()))
+    }) || document.images.iter().any(|image| {
+        image
+            .parent_id
+            .as_ref()
+            .is_some_and(|parent_id| !ids.contains(parent_id.as_str()))
+    }) {
+        return Err("Every map item must connect to an existing parent.".into());
+    }
+
+    let mut reachable = HashSet::with_capacity(ids.len());
+    let mut pending = vec![roots[0].id.as_str()];
+    while let Some(id) = pending.pop() {
+        if !reachable.insert(id) {
+            continue;
+        }
+        if let Some(descendants) = children.get(id) {
+            pending.extend(descendants.iter().copied());
+        }
+    }
+    if reachable.len() != ids.len() {
+        return Err("Every map item must be connected to the root idea.".into());
+    }
     if total_image_data > 2_000_000 {
         return Err("The combined images are too large for a local mind map.".into());
     }
@@ -165,8 +176,20 @@ fn load_map(app: AppHandle) -> Result<Option<MindMapDocument>, String> {
     let path = document_path(&app)?;
     match fs::read_to_string(path) {
         Ok(contents) => {
-            let document: MindMapDocument =
+            let mut document: MindMapDocument =
                 serde_json::from_str(&contents).map_err(|error| error.to_string())?;
+            if let Some(root_id) = document
+                .nodes
+                .iter()
+                .find(|node| node.parent_id.is_none())
+                .map(|node| node.id.clone())
+            {
+                for image in &mut document.images {
+                    if image.parent_id.is_none() {
+                        image.parent_id = Some(root_id.clone());
+                    }
+                }
+            }
             validate_document(&document)?;
             Ok(Some(document))
         }

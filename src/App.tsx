@@ -37,6 +37,14 @@ function nodeWidth(node: MindMapNode) {
   return node.parentId === null ? ROOT_WIDTH : NODE_WIDTH
 }
 
+function itemWidth(item: MindMapNode | MindMapImage) {
+  return 'dataUrl' in item ? item.width : nodeWidth(item)
+}
+
+function itemLabel(item: MindMapNode | MindMapImage) {
+  return 'text' in item ? item.text : item.name
+}
+
 function wrapText(text: string, limit: number) {
   const words = text.trim().split(/\s+/).filter(Boolean)
   const lines: string[] = []
@@ -137,6 +145,10 @@ function App() {
   const selectedNode = document.nodes.find((node) => node.id === selectedId) ?? rootNode
   const selectedImage = (document.images ?? []).find((image) => image.id === selectedImageId)
   const activeTheme = BOARD_THEMES.find((theme) => theme.id === document.theme) ?? BOARD_THEMES[0]
+  const graphItems = useMemo(() => [...document.nodes, ...document.images], [document.nodes, document.images])
+  const graphItemsById = useMemo(() => new Map(graphItems.map((item) => [item.id, item])), [graphItems])
+  const selectedImageParent = selectedImage ? graphItemsById.get(selectedImage.parentId) : undefined
+  const selectedNodeParent = selectedNode?.parentId ? graphItemsById.get(selectedNode.parentId) : undefined
 
   useEffect(() => {
     let active = true
@@ -178,15 +190,15 @@ function App() {
   }, [canSave, document, loaded])
 
   const childrenByParent = useMemo(() => {
-    const children = new Map<string, MindMapNode[]>()
-    for (const node of document.nodes) {
-      if (!node.parentId) continue
-      const current = children.get(node.parentId) ?? []
-      current.push(node)
-      children.set(node.parentId, current)
+    const children = new Map<string, (MindMapNode | MindMapImage)[]>()
+    for (const item of graphItems) {
+      if (!item.parentId) continue
+      const current = children.get(item.parentId) ?? []
+      current.push(item)
+      children.set(item.parentId, current)
     }
     return children
-  }, [document.nodes])
+  }, [graphItems])
 
   const updateNode = useCallback((id: string, update: Partial<MindMapNode>) => {
     setCanSave(true)
@@ -205,54 +217,75 @@ function App() {
   }, [])
 
   const addIdea = useCallback(() => {
-    if (!selectedNode) return
-    const siblings = childrenByParent.get(selectedNode.id) ?? []
-    const root = document.nodes.find((node) => node.parentId === null)
-    const direction = selectedNode.id === root?.id
+    const parent = selectedImage ?? selectedNode
+    if (!parent || !rootNode) return
+    const siblings = childrenByParent.get(parent.id) ?? []
+    const direction = parent.id === rootNode.id
       ? (siblings.length % 2 === 0 ? 1 : -1)
-      : selectedNode.x >= (root?.x ?? VIEW_WIDTH / 2) ? 1 : -1
+      : parent.x >= rootNode.x ? 1 : -1
+    const color = siblings.find((item): item is MindMapNode => 'text' in item)?.color
+      ?? ('color' in parent ? parent.color : rootNode.color)
+    const horizontalGap = parent.id === rootNode.id && !('dataUrl' in parent)
+      ? 252
+      : itemWidth(parent) / 2 + NODE_WIDTH / 2 + 51
     const newNode: MindMapNode = {
       id: crypto.randomUUID(),
-      parentId: selectedNode.id,
+      parentId: parent.id,
       text: 'New idea',
       note: '',
-      color: siblings[0]?.color ?? 'lilac',
-      x: selectedNode.x + direction * 252,
-      y: selectedNode.y + (siblings.length - (siblings.length - 1) / 2) * 102,
+      color,
+      x: parent.x + direction * horizontalGap,
+      y: parent.y + (siblings.length - (siblings.length - 1) / 2) * 102,
     }
     setDocument((current) => ({ ...current, nodes: [...current.nodes, newNode] }))
     setCanSave(true)
     setSelectedImageId(null)
     setSelectedId(newNode.id)
     setNotice('')
-  }, [childrenByParent, document.nodes, selectedNode])
+  }, [childrenByParent, rootNode, selectedImage, selectedNode])
 
-  const deleteIdea = useCallback(() => {
-    if (!selectedNode || selectedNode.parentId === null) return
-    const removed = new Set([selectedNode.id])
-    let changed = true
-    while (changed) {
-      changed = false
-      for (const node of document.nodes) {
-        if (node.parentId && removed.has(node.parentId) && !removed.has(node.id)) {
-          removed.add(node.id)
-          changed = true
-        }
+  const selectItem = useCallback((id: string) => {
+    const item = graphItemsById.get(id)
+    if (!item) return
+    if ('dataUrl' in item) {
+      setSelectedId('')
+      setSelectedImageId(item.id)
+    } else {
+      setSelectedId(item.id)
+      setSelectedImageId(null)
+    }
+  }, [graphItemsById])
+
+  const removeSubtree = useCallback((id: string) => {
+    const removed = new Set<string>([id])
+    const pending = [id]
+    while (pending.length) {
+      for (const child of childrenByParent.get(pending.pop()!) ?? []) {
+        if (removed.has(child.id)) continue
+        removed.add(child.id)
+        pending.push(child.id)
       }
     }
-    const parentId = selectedNode.parentId
-    setDocument((current) => ({ ...current, nodes: current.nodes.filter((node) => !removed.has(node.id)) }))
+    const parentId = graphItemsById.get(id)?.parentId
+    setDocument((current) => ({
+      ...current,
+      nodes: current.nodes.filter((node) => !removed.has(node.id)),
+      images: current.images.filter((image) => !removed.has(image.id)),
+    }))
     setCanSave(true)
-    setSelectedImageId(null)
-    setSelectedId(parentId)
-  }, [document.nodes, selectedNode])
+    if (parentId) selectItem(parentId)
+    else selectItem(rootNode.id)
+  }, [childrenByParent, graphItemsById, rootNode.id, selectItem])
+
+  const deleteIdea = useCallback(() => {
+    if (!selectedNode || selectedNode.id === rootNode.id) return
+    removeSubtree(selectedNode.id)
+  }, [removeSubtree, rootNode.id, selectedNode])
 
   const deleteImage = useCallback(() => {
     if (!selectedImage) return
-    setDocument((current) => ({ ...current, images: current.images.filter((image) => image.id !== selectedImage.id) }))
-    setCanSave(true)
-    setSelectedImageId(null)
-  }, [selectedImage])
+    removeSubtree(selectedImage.id)
+  }, [removeSubtree, selectedImage])
 
   const startNewDocument = useCallback(() => {
     if (!window.confirm('Start a new document? This replaces the current map. Export it first if you want to keep a copy.')) return
@@ -281,12 +314,18 @@ function App() {
     try {
       const prepared = await prepareImage(file)
       const images = document.images ?? []
+      const parent = selectedImage ?? selectedNode
+      const siblings = childrenByParent.get(parent.id) ?? []
+      const direction = parent.id === rootNode.id
+        ? (siblings.length % 2 === 0 ? 1 : -1)
+        : parent.x >= rootNode.x ? 1 : -1
       const image: MindMapImage = {
         id: crypto.randomUUID(),
+        parentId: parent.id,
         name: file.name.slice(0, 120) || 'Image',
         dataUrl: prepared.dataUrl,
-        x: selectedNode.x + 300,
-        y: selectedNode.y + 140 + images.length * 38,
+        x: parent.x + direction * (itemWidth(parent) / 2 + prepared.width / 2 + 60),
+        y: parent.y + (siblings.length - (siblings.length - 1) / 2) * 112,
         width: prepared.width,
         height: prepared.height,
       }
@@ -296,6 +335,7 @@ function App() {
       setDocument((current) => ({ ...current, images: [...current.images, image] }))
       setCanSave(true)
       setSelectedImageId(image.id)
+      setSelectedId('')
       setNotice('')
     } catch (error) {
       setNotice(`Couldn't add that image: ${error instanceof Error ? error.message : String(error)}`)
@@ -326,8 +366,11 @@ function App() {
   const matchingIds = useMemo(() => {
     const query = search.trim().toLowerCase()
     if (!query) return null
-    return new Set(document.nodes.filter((node) => `${node.text} ${node.note}`.toLowerCase().includes(query)).map((node) => node.id))
-  }, [document.nodes, search])
+    return new Set([
+      ...document.nodes.filter((node) => `${node.text} ${node.note}`.toLowerCase().includes(query)).map((node) => node.id),
+      ...document.images.filter((image) => image.name.toLowerCase().includes(query)).map((image) => image.id),
+    ])
+  }, [document.images, document.nodes, search])
 
   function exportMap() {
     const blob = new Blob([JSON.stringify(document, null, 2)], { type: 'application/json' })
@@ -374,7 +417,7 @@ function App() {
           <div className="workspace-icon"><Lightbulb size={17} /></div>
           <div className="workspace-copy">
             <span className="workspace-name">{document.title}</span>
-            <span className="workspace-count">{document.nodes.length} ideas · just you</span>
+            <span className="workspace-count">{document.nodes.length} ideas{document.images.length ? ` · ${document.images.length} images` : ''} · just you</span>
           </div>
           <span className="active-dot" />
         </div>
@@ -384,7 +427,7 @@ function App() {
           <span className="branch-count">{childrenByParent.get(rootNode?.id ?? '')?.length ?? 0}</span>
         </div>
         <nav className="branch-list" aria-label="Map branches">
-          {(childrenByParent.get(rootNode?.id ?? '') ?? []).map((node) => (
+          {(childrenByParent.get(rootNode?.id ?? '') ?? []).filter((item): item is MindMapNode => 'text' in item).map((node) => (
             <button key={node.id} className={`branch-link ${selectedId === node.id ? 'is-selected' : ''}`} onClick={() => { setSelectedId(node.id); setSelectedImageId(null) }}>
               <span className="branch-swatch" style={{ backgroundColor: NODE_COLORS.find((color) => color.name === node.color)?.value ?? '#d9c8f2' }} />
               <span className="branch-label">{node.text}</span>
@@ -538,21 +581,22 @@ function App() {
               <rect className="canvas-grid" width={VIEW_WIDTH} height={VIEW_HEIGHT} fill="url(#dot-grid)" pointerEvents="none" />
               <g transform={`translate(${VIEW_WIDTH * (1 - zoom) / 2 + pan.x} ${VIEW_HEIGHT * (1 - zoom) / 2 + pan.y}) scale(${zoom})`}>
                 <g className="connections">
-                  {document.nodes.filter((node) => node.parentId).map((node) => {
-                    const parent = document.nodes.find((candidate) => candidate.id === node.parentId)
+                  {graphItems.map((item) => {
+                    if (!item.parentId) return null
+                    const parent = graphItemsById.get(item.parentId)
                     if (!parent) return null
-                    const direction = node.x >= parent.x ? 1 : -1
-                    const startX = parent.x + direction * (nodeWidth(parent) / 2 - 5)
-                    const endX = node.x - direction * (nodeWidth(node) / 2 - 5)
+                    const direction = item.x >= parent.x ? 1 : -1
+                    const startX = parent.x + direction * (itemWidth(parent) / 2 - 5)
+                    const endX = item.x - direction * (itemWidth(item) / 2 - 5)
                     const curve = Math.max(55, Math.abs(endX - startX) * 0.42)
-                    const dimmed = matchingIds !== null && !matchingIds.has(node.id) && !matchingIds.has(parent.id)
-                    return <path key={`edge-${node.id}`} className={`connection ${dimmed ? 'is-dimmed' : ''}`} style={{ stroke: activeTheme.connection }} d={`M ${startX} ${parent.y} C ${startX + direction * curve} ${parent.y}, ${endX - direction * curve} ${node.y}, ${endX} ${node.y}`} />
+                    const dimmed = matchingIds !== null && !matchingIds.has(item.id) && !matchingIds.has(parent.id)
+                    return <path key={`edge-${item.id}`} className={`connection ${dimmed ? 'is-dimmed' : ''}`} style={{ stroke: activeTheme.connection }} d={`M ${startX} ${parent.y} C ${startX + direction * curve} ${parent.y}, ${endX - direction * curve} ${item.y}, ${endX} ${item.y}`} />
                   })}
                 </g>
                 {(document.images ?? []).map((image, index) => (
                   <g
                     key={image.id}
-                    className={`board-image ${selectedImageId === image.id ? 'is-active' : ''} ${draggingId === image.id ? 'is-dragging' : ''}`}
+                    className={`board-image ${selectedImageId === image.id ? 'is-active' : ''} ${draggingId === image.id ? 'is-dragging' : ''} ${matchingIds !== null && !matchingIds.has(image.id) ? 'is-dimmed' : ''}`}
                     transform={`translate(${image.x} ${image.y})`}
                     onPointerDown={(event) => {
                       if (event.button !== 0) return
@@ -575,6 +619,7 @@ function App() {
                     <image href={image.dataUrl} x={-image.width / 2} y={-image.height / 2} width={image.width} height={image.height} preserveAspectRatio="xMidYMid slice" clipPath={`url(#image-clip-${index})`} pointerEvents="none" />
                     <rect className="board-image-frame" x={-image.width / 2} y={-image.height / 2} width={image.width} height={image.height} rx="10" />
                     <text className="board-image-label" y={image.height / 2 + 17}>{image.name.length > 26 ? `${image.name.slice(0, 23)}...` : image.name}</text>
+                    {childrenByParent.has(image.id) && <text className="child-count" x={image.width / 2 - 13} y={-image.height / 2 + 12}>{childrenByParent.get(image.id)?.length}</text>}
                   </g>
                 ))}
                 {document.nodes.map((node) => {
@@ -620,7 +665,7 @@ function App() {
               <span><span className="footer-key">⌘</span> <span className="footer-key">↵</span> add an idea</span>
               <span className="footer-separator">·</span>
               <span>Drag to rearrange · click to explore</span>
-              <span className="canvas-idea-count">{document.nodes.length} ideas</span>
+              <span className="canvas-idea-count">{document.nodes.length} ideas{document.images.length ? ` · ${document.images.length} images` : ''}</span>
             </div>
           </div>
 
@@ -640,6 +685,16 @@ function App() {
                   <img src={selectedImage.dataUrl} alt={selectedImage.name} />
                 </div>
                 <div className="inspector-separator image-separator" />
+                <button className="add-branch-button" onClick={addIdea}><Plus size={16} /> Add a connected idea</button>
+                <div className="parent-context">
+                  <span className="parent-label">CONNECTED TO</span>
+                  {selectedImageParent && (
+                    <button className="parent-pill" onClick={() => selectItem(selectedImageParent.id)}>
+                      <span className="parent-swatch" style={{ backgroundColor: 'color' in selectedImageParent ? NODE_COLORS.find((color) => color.name === selectedImageParent.color)?.value : '#dddcd6' }} />
+                      {itemLabel(selectedImageParent)}
+                    </button>
+                  )}
+                </div>
                 <button className="delete-branch-button" onClick={deleteImage}><Trash2 size={15} /> Remove image from board</button>
                 <div className="ai-card">
                   <div className="ai-icon"><ImagePlus size={15} /></div>
@@ -673,9 +728,9 @@ function App() {
                 {selectedNode.parentId && <button className="delete-branch-button" onClick={deleteIdea}><Trash2 size={15} /> Remove this idea & its branches</button>}
                 <div className="parent-context">
                   <span className="parent-label">CONNECTED TO</span>
-                  <button className="parent-pill" onClick={() => { if (selectedNode.parentId) { setSelectedId(selectedNode.parentId); setSelectedImageId(null) } }}>
-                    <span className="parent-swatch" style={{ backgroundColor: NODE_COLORS.find((color) => color.name === (document.nodes.find((node) => node.id === selectedNode.parentId)?.color ?? rootNode?.color))?.value ?? '#d9c8f2' }} />
-                    {selectedNode.parentId ? document.nodes.find((node) => node.id === selectedNode.parentId)?.text : 'Your central idea'}
+                  <button className="parent-pill" onClick={() => { if (selectedNode.parentId) selectItem(selectedNode.parentId) }}>
+                      <span className="parent-swatch" style={{ backgroundColor: selectedNodeParent && 'color' in selectedNodeParent ? NODE_COLORS.find((color) => color.name === selectedNodeParent.color)?.value : '#dddcd6' }} />
+                      {selectedNodeParent ? itemLabel(selectedNodeParent) : 'Your central idea'}
                   </button>
                 </div>
                 <div className="ai-card">

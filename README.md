@@ -15,7 +15,7 @@ To create a desktop bundle, run `npm run app:build`. To work on the frontend in 
 
 ## Mind maps
 
-Add connected ideas, write notes, change colors, search the map, and adjust the canvas zoom. Drag the board background to pan, or drag individual ideas and images to rearrange them. Choose from five board themes and add images that are resized and stored with the map.
+Add connected ideas, write notes, change colors, search the map, and adjust the canvas zoom. Drag the board background to pan, or drag individual ideas and images to rearrange them. Images and ideas can be nested under ideas or images, with their connections shown on the board. Choose from five board themes and add images that are resized and stored with the map.
 
 Changes are saved locally as you work. Use Import and Export to move a map as a JSON file. Choose **New document** to replace the current map with a fresh one; the app asks for confirmation first.
 

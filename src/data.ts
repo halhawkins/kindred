@@ -38,9 +38,11 @@ export const BOARD_THEMES: { id: BoardThemeId; label: string; background: string
   { id: 'night', label: 'Night garden', background: '#252a32', grid: '#434b56', connection: '#687483', preview: '#343c48' },
 ]
 
+type MindMapImageInput = Omit<MindMapImage, 'parentId'> & { parentId?: string | null }
+
 type MindMapDocumentInput = Omit<MindMapDocument, 'theme' | 'images'> & {
   theme?: BoardThemeId
-  images?: MindMapImage[]
+  images?: MindMapImageInput[]
 }
 
 export function isMindMapDocument(value: unknown): value is MindMapDocumentInput {
@@ -88,7 +90,9 @@ export function isMindMapDocument(value: unknown): value is MindMapDocumentInput
     if (
       typeof image.id !== 'string' ||
       !image.id ||
+      ids.has(image.id) ||
       imageIds.has(image.id) ||
+      (image.parentId !== undefined && image.parentId !== null && typeof image.parentId !== 'string') ||
       typeof image.name !== 'string' ||
       image.name.length > 120 ||
       typeof image.dataUrl !== 'string' ||
@@ -112,7 +116,15 @@ export function isMindMapDocument(value: unknown): value is MindMapDocumentInput
   if (totalImageData > 2_000_000) return false
 
   const roots = document.nodes.filter((node) => node.parentId === null)
-  if (roots.length !== 1 || !document.nodes.every((node) => node.parentId === null || ids.has(node.parentId))) return false
+  if (roots.length !== 1) return false
+  const rootId = roots[0].id
+  if (
+    !document.nodes.every((node) => node.parentId === null || ids.has(node.parentId) || imageIds.has(node.parentId)) ||
+    !images.every((image) => {
+      const parentId = image.parentId ?? rootId
+      return ids.has(parentId) || imageIds.has(parentId)
+    })
+  ) return false
 
   const children = new Map<string, string[]>()
   for (const node of document.nodes) {
@@ -120,6 +132,12 @@ export function isMindMapDocument(value: unknown): value is MindMapDocumentInput
     const siblings = children.get(node.parentId) ?? []
     siblings.push(node.id)
     children.set(node.parentId, siblings)
+  }
+  for (const image of images) {
+    const parentId = image.parentId ?? rootId
+    const siblings = children.get(parentId) ?? []
+    siblings.push(image.id)
+    children.set(parentId, siblings)
   }
   const visited = new Set<string>()
   const pending = [roots[0].id]
@@ -129,14 +147,15 @@ export function isMindMapDocument(value: unknown): value is MindMapDocumentInput
     visited.add(id)
     pending.push(...(children.get(id) ?? []))
   }
-  return visited.size === document.nodes.length
+  return visited.size === document.nodes.length + images.length
 }
 
 export function parseMindMapDocument(value: unknown): MindMapDocument {
   if (!isMindMapDocument(value)) throw new Error('This file is not a valid Kindred mind map.')
+  const rootId = value.nodes.find((node) => node.parentId === null)!.id
   return {
     ...value,
     theme: value.theme ?? 'paper',
-    images: value.images ?? [],
+    images: (value.images ?? []).map((image) => ({ ...image, parentId: image.parentId ?? rootId })),
   }
 }
