@@ -512,7 +512,7 @@ function App() {
             <div className="zoom-control">
               <button className="zoom-button" aria-label="Zoom out" onClick={() => setZoom((current) => Math.max(0.65, Math.round((current - 0.1) * 10) / 10))}><Minus size={14} /></button>
               <span>{Math.round(zoom * 100)}%</span>
-              <button className="zoom-button" aria-label="Zoom in" onClick={() => setZoom((current) => Math.min(1.35, Math.round((current + 0.1) * 10) / 10))}><Plus size={14} /></button>
+              <button className="zoom-button" aria-label="Zoom in" onClick={() => setZoom((current) => Math.min(2.35, Math.round((current + 0.1) * 10) / 10))}><Plus size={14} /></button>
             </div>
             <button className="zoom-button fit-button" aria-label="Reset zoom" onClick={() => setZoom(1)}><Focus size={15} /></button>
           </div>
