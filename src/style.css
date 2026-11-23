@@ -112,7 +112,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 .sidebar-collapse { margin-left: auto; width: 26px; height: 26px; }
 .workspace-label, .sidebar-section-heading, .eyebrow, .field-group > label, .parent-label {
   color: #a09d95;
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 700;
   letter-spacing: 1.08px;
 }
@@ -190,11 +190,11 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 .branch-link:hover, .sidebar-action:hover { background: #f5f4ef; color: #42413a; }
 .branch-link.is-selected { background: #f0f3ed; color: #506b57; }
 .branch-swatch, .parent-swatch { width: 9px; height: 9px; flex: 0 0 9px; border-radius: 3px; }
-.branch-label { flex: 1; min-width: 0; overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
-.branch-link .branch-count { font-size: 9px; }
-.empty-sidebar { margin: 0 9px; color: #a5a197; font-size: 10px; line-height: 1.6; }
+.branch-label { flex: 1; min-width: 0; overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.branch-link .branch-count { font-size: 13px; }
+.empty-sidebar { margin: 0 9px; color: #a5a197; font-size: 14px; line-height: 1.6; }
 .sidebar-actions .sidebar-section-heading { margin-top: 32px; }
-.sidebar-action { gap: 10px; height: 35px; font-size: 11px; }
+.sidebar-action { gap: 10px; height: 35px; font-size: 13px; }
 .sidebar-action > svg { color: #98958c; }
 .sidebar-action-label { flex: 1; }
 kbd {
@@ -460,7 +460,7 @@ kbd {
   background: #fffefa;
 }
 .inspector-heading { margin-bottom: 24px; display: flex; align-items: flex-start; justify-content: space-between; }
-.eyebrow { font-size: 8px; letter-spacing: 1px; }
+.eyebrow { font-size: 11px; letter-spacing: 1px; }
 .inspector-heading h2 { margin: 5px 0 0; color: #424039; font-family: var(--serif); font-size: 21px; font-weight: 400; }
 .inspector-more { width: 25px; height: 25px; margin: -4px -5px 0 0; }
 .field-group { margin-bottom: 20px; }
@@ -474,7 +474,7 @@ kbd {
   resize: vertical;
   background: #fffefa;
   color: #4c4942;
-  font-size: 11px;
+  font-size: 13px;
   line-height: 1.55;
   transition: border-color .15s, box-shadow .15s;
 }
