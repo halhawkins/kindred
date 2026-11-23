@@ -3,9 +3,11 @@ import {
   ArrowDownToLine,
   ArrowUpFromLine,
   Check,
+  CircleAlert,
   ChevronDown,
   CircleHelp,
   Command,
+  Download,
   FilePlus2,
   Focus,
   ImagePlus,
@@ -15,11 +17,19 @@ import {
   Palette,
   Plus,
   Search,
+  Settings2,
   Sparkles,
   Trash2,
   X,
 } from 'lucide-react'
 import { BOARD_THEMES, DEFAULT_MAP, NODE_COLORS, parseMindMapDocument } from './data'
+import {
+  DEFAULT_LOCAL_MODEL,
+  getConfiguredModel,
+  localLlmProvider,
+  saveConfiguredModel,
+} from './ollama'
+import type { IdeaSuggestionContext, LocalLlmStatus } from './ollama'
 import { loadMap, saveMap } from './persistence'
 import type { MindMapDocument, MindMapImage, MindMapNode } from './types'
 
@@ -135,6 +145,17 @@ function App() {
   const [draggingId, setDraggingId] = useState<string | null>(null)
   const [isPanning, setIsPanning] = useState(false)
   const [themeMenuOpen, setThemeMenuOpen] = useState(false)
+  const [suggestions, setSuggestions] = useState<string[]>([])
+  const [suggestionForNodeId, setSuggestionForNodeId] = useState<string | null>(null)
+  const [suggestionError, setSuggestionError] = useState('')
+  const [isSuggesting, setIsSuggesting] = useState(false)
+  const [aiModel, setAiModel] = useState(getConfiguredModel)
+  const [aiModelDraft, setAiModelDraft] = useState(aiModel)
+  const [aiSettingsOpen, setAiSettingsOpen] = useState(false)
+  const [aiStatus, setAiStatus] = useState<LocalLlmStatus | null>(null)
+  const [aiStatusBusy, setAiStatusBusy] = useState(false)
+  const [aiDownloadBusy, setAiDownloadBusy] = useState(false)
+  const [aiSettingsError, setAiSettingsError] = useState('')
   const importRef = useRef<HTMLInputElement>(null)
   const imageInputRef = useRef<HTMLInputElement>(null)
   const canvasWrapRef = useRef<HTMLDivElement>(null)
@@ -216,7 +237,7 @@ function App() {
     }))
   }, [])
 
-  const addIdea = useCallback(() => {
+  const addIdea = useCallback((text = 'New idea') => {
     const parent = selectedImage ?? selectedNode
     if (!parent || !rootNode) return
     const siblings = childrenByParent.get(parent.id) ?? []
@@ -231,7 +252,7 @@ function App() {
     const newNode: MindMapNode = {
       id: crypto.randomUUID(),
       parentId: parent.id,
-      text: 'New idea',
+      text,
       note: '',
       color,
       x: parent.x + direction * horizontalGap,
@@ -243,6 +264,92 @@ function App() {
     setSelectedId(newNode.id)
     setNotice('')
   }, [childrenByParent, rootNode, selectedImage, selectedNode])
+
+  const refreshAiStatus = useCallback(async (refresh = false) => {
+    setAiStatusBusy(true)
+    try {
+      const status = await localLlmProvider.checkAvailability(aiModel, refresh)
+      setAiStatus(status)
+      setAiSettingsError(status.error ?? '')
+      return status
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      setAiSettingsError(message)
+      return null
+    } finally {
+      setAiStatusBusy(false)
+    }
+  }, [aiModel])
+
+  useEffect(() => {
+    if (aiSettingsOpen) void refreshAiStatus()
+  }, [aiSettingsOpen, refreshAiStatus])
+
+  const requestSuggestions = useCallback(async () => {
+    if (!selectedNode || selectedImage || isSuggesting) return
+    setIsSuggesting(true)
+    setSuggestions([])
+    setSuggestionForNodeId(selectedNode.id)
+    setSuggestionError('')
+    try {
+      const status = await localLlmProvider.checkAvailability(aiModel)
+      setAiStatus(status)
+      if (!status.ollamaAvailable || !status.modelAvailable) {
+        setAiSettingsOpen(true)
+        setAiSettingsError(status.error ?? '')
+        return
+      }
+
+      const children = (childrenByParent.get(selectedNode.id) ?? [])
+        .filter((item): item is MindMapNode => 'text' in item)
+        .map((node) => ({ text: node.text, note: node.note }))
+      const context: IdeaSuggestionContext = {
+        selected: { text: selectedNode.text, note: selectedNode.note },
+        parent: selectedNodeParent && 'text' in selectedNodeParent
+          ? { text: selectedNodeParent.text, note: selectedNodeParent.note }
+          : selectedNodeParent
+            ? { text: itemLabel(selectedNodeParent), note: '' }
+            : null,
+        children,
+      }
+      setSuggestions(await localLlmProvider.suggest(context, aiModel))
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      setSuggestionError(message)
+      if (message.includes('is not available')) {
+        setAiSettingsOpen(true)
+        await refreshAiStatus(true)
+      }
+    } finally {
+      setIsSuggesting(false)
+    }
+  }, [aiModel, childrenByParent, isSuggesting, refreshAiStatus, selectedImage, selectedNode, selectedNodeParent])
+
+  async function downloadAiModel() {
+    setAiDownloadBusy(true)
+    setAiSettingsError('')
+    try {
+      await localLlmProvider.downloadModel(aiModel)
+      await refreshAiStatus(true)
+    } catch (error) {
+      setAiSettingsError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setAiDownloadBusy(false)
+    }
+  }
+
+  function applyAiModel() {
+    try {
+      const model = aiModelDraft.trim()
+      saveConfiguredModel(model)
+      setAiModel(model)
+      setAiModelDraft(model)
+      setAiStatus(null)
+      setAiSettingsError('')
+    } catch (error) {
+      setAiSettingsError(error instanceof Error ? error.message : String(error))
+    }
+  }
 
   const selectItem = useCallback((id: string) => {
     const item = graphItemsById.get(id)
@@ -439,7 +546,7 @@ function App() {
 
         <div className="sidebar-actions">
           <div className="sidebar-section-heading"><span>QUICK ACTIONS</span></div>
-          <button className="sidebar-action" onClick={addIdea} title="Add a thought"><Plus size={16} /><span className="sidebar-action-label">Add a thought</span><kbd>⌘ ↵</kbd></button>
+          <button className="sidebar-action" onClick={() => addIdea()} title="Add a thought"><Plus size={16} /><span className="sidebar-action-label">Add a thought</span><kbd>⌘ ↵</kbd></button>
           <button className="sidebar-action" onClick={() => imageInputRef.current?.click()} title="Add an image"><ImagePlus size={16} /><span className="sidebar-action-label">Add an image</span></button>
           <button className="sidebar-action" onClick={startNewDocument} title="Start a new document"><FilePlus2 size={16} /><span className="sidebar-action-label">New document</span></button>
           <button className="sidebar-action" onClick={() => importRef.current?.click()} title="Import a map"><ArrowUpFromLine size={16} /><span className="sidebar-action-label">Import a map</span></button>
@@ -472,7 +579,11 @@ function App() {
           </div>
           <div className="topbar-actions">
             <button className="topbar-export" onClick={exportMap}><ArrowDownToLine size={15} /> <span>Export</span></button>
-            <button className="primary-button" onClick={addIdea}><Plus size={16} /> Add idea <kbd><Command size={11} /> ↵</kbd></button>
+            <button className="topbar-export suggest-toolbar-button" onClick={() => void requestSuggestions()} disabled={isSuggesting || Boolean(selectedImage)} title={selectedImage ? 'Select an idea to get suggestions' : 'Suggest child ideas for the selected node'}>
+              {isSuggesting ? <LoaderCircle size={15} className="spin" /> : <Sparkles size={15} />} <span>Suggest ideas</span>
+            </button>
+            <button className="primary-button" onClick={() => addIdea()}><Plus size={16} /> Add idea <kbd><Command size={11} /> ↵</kbd></button>
+            <button className="icon-button ai-settings-trigger" aria-label="AI settings" title="AI settings" onClick={() => { setAiModelDraft(aiModel); setAiSettingsOpen(true) }}><Settings2 size={17} /></button>
             <button className="icon-button topbar-more" aria-label="More options" onClick={() => setNotice('Your map is saved locally and can be exported as a JSON file.')}><CircleHelp size={17} /></button>
           </div>
         </header>
@@ -685,7 +796,7 @@ function App() {
                   <img src={selectedImage.dataUrl} alt={selectedImage.name} />
                 </div>
                 <div className="inspector-separator image-separator" />
-                <button className="add-branch-button" onClick={addIdea}><Plus size={16} /> Add a connected idea</button>
+                <button className="add-branch-button" onClick={() => addIdea()}><Plus size={16} /> Add a connected idea</button>
                 <div className="parent-context">
                   <span className="parent-label">CONNECTED TO</span>
                   {selectedImageParent && (
@@ -724,7 +835,26 @@ function App() {
                   </div>
                 </div>
                 <div className="inspector-separator" />
-                <button className="add-branch-button" onClick={addIdea}><Plus size={16} /> Add a connected idea</button>
+                <button className="add-branch-button" onClick={() => addIdea()}><Plus size={16} /> Add a connected idea</button>
+                <button className="suggest-ideas-button" onClick={() => void requestSuggestions()} disabled={isSuggesting}>
+                  {isSuggesting ? <LoaderCircle size={15} className="spin" /> : <Sparkles size={15} />}
+                  {isSuggesting ? 'Generating suggestions...' : 'Suggest ideas'}
+                </button>
+                {suggestionForNodeId === selectedNode.id && (suggestionError || suggestions.length > 0) && (
+                  <div className="suggestion-results" aria-live="polite">
+                    {suggestionError && <p className="suggestion-error" role="alert">{suggestionError}</p>}
+                    {suggestions.length > 0 && (
+                      <>
+                        <span className="suggestion-heading">CHOOSE IDEAS TO ADD</span>
+                        {suggestions.map((suggestion) => (
+                          <button key={suggestion} className="suggestion-option" onClick={() => addIdea(suggestion)}>
+                            <Plus size={13} /><span>{suggestion}</span>
+                          </button>
+                        ))}
+                      </>
+                    )}
+                  </div>
+                )}
                 {selectedNode.parentId && <button className="delete-branch-button" onClick={deleteIdea}><Trash2 size={15} /> Remove this idea & its branches</button>}
                 <div className="parent-context">
                   <span className="parent-label">CONNECTED TO</span>
@@ -735,14 +865,66 @@ function App() {
                 </div>
                 <div className="ai-card">
                   <div className="ai-icon"><Sparkles size={15} /></div>
-                  <div className="ai-card-copy"><strong>A little help, later</strong><span>AI-powered brainstorming is on the way.</span></div>
-                  <span className="coming-soon">SOON</span>
+                  <div className="ai-card-copy"><strong>Private, local brainstorming</strong><span>Uses {aiModel} through Ollama on this device.</span></div>
                 </div>
               </>
             ) : <p className="empty-inspector">Choose an idea to see its details.</p>}
           </aside>
         </div>
       </section>
+      {aiSettingsOpen && (
+        <div className="ai-settings-backdrop" onMouseDown={(event) => {
+          if (event.target === event.currentTarget) setAiSettingsOpen(false)
+        }}>
+          <section className="ai-settings-dialog" role="dialog" aria-modal="true" aria-labelledby="ai-settings-title">
+            <div className="ai-settings-heading">
+              <div><span className="eyebrow">ON-DEVICE INFERENCE</span><h2 id="ai-settings-title">Local AI settings</h2></div>
+              <button className="icon-button" aria-label="Close AI settings" onClick={() => setAiSettingsOpen(false)}><X size={16} /></button>
+            </div>
+            <label className="ai-model-field" htmlFor="ai-model-tag">OLLAMA MODEL TAG</label>
+            <div className="ai-model-entry">
+              <input id="ai-model-tag" value={aiModelDraft} maxLength={100} onChange={(event) => setAiModelDraft(event.target.value)} />
+              <button className="settings-action-button" onClick={applyAiModel} disabled={aiModelDraft.trim() === aiModel}>Save</button>
+            </div>
+            <p className="ai-settings-hint">Default: {DEFAULT_LOCAL_MODEL}. Change this to any model tag installed in your Ollama library.</p>
+            <div className={`ai-status-card ${aiStatus?.ollamaAvailable ? aiStatus.modelAvailable ? 'is-ready' : 'is-missing' : 'is-offline'}`} role="status">
+              {aiStatus?.ollamaAvailable && aiStatus.modelAvailable
+                ? <Check size={17} />
+                : <CircleAlert size={17} />}
+              <div>
+                <strong>
+                  {!aiStatus && !aiSettingsError ? 'Status not checked' :
+                    aiStatus?.ollamaAvailable ? aiStatus.modelAvailable ? 'Ollama and model ready' : 'Model not downloaded' :
+                      'Ollama unavailable'}
+                </strong>
+                <span>
+                  {aiStatus?.ollamaAvailable
+                    ? aiStatus.modelAvailable
+                      ? `${aiModel} is ready for local suggestions.`
+                      : `Download ${aiModel} to enable suggestions.`
+                    : aiStatus?.error ?? aiSettingsError ?? 'Check that Ollama is installed and running on this device.'}
+                </span>
+                {aiStatus?.cached && <small>Availability check cached for up to 30 seconds.</small>}
+                {!aiStatus?.ollamaAvailable && <a href="https://ollama.com/download" target="_blank" rel="noreferrer">Install Ollama</a>}
+              </div>
+            </div>
+            {aiSettingsError && aiStatus?.error !== aiSettingsError && <p className="ai-settings-error" role="alert">{aiSettingsError}</p>}
+            <div className="ai-settings-actions">
+              <button className="settings-action-button secondary" onClick={() => void refreshAiStatus(true)} disabled={aiStatusBusy || aiDownloadBusy}>
+                {aiStatusBusy ? <LoaderCircle size={14} className="spin" /> : <Settings2 size={14} />}
+                {aiStatusBusy ? 'Checking...' : 'Check status'}
+              </button>
+              {aiStatus?.ollamaAvailable && !aiStatus.modelAvailable && (
+                <button className="settings-action-button" onClick={() => void downloadAiModel()} disabled={aiDownloadBusy || aiStatusBusy}>
+                  {aiDownloadBusy ? <LoaderCircle size={14} className="spin" /> : <Download size={14} />}
+                  {aiDownloadBusy ? 'Downloading model...' : 'Download model'}
+                </button>
+              )}
+            </div>
+            <p className="ai-download-note">Models download only when requested and are never bundled with Kindred.</p>
+          </section>
+        </div>
+      )}
     </main>
   )
 }
