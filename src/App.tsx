@@ -22,6 +22,20 @@ import {
   Trash2,
   X,
 } from 'lucide-react'
+import { isTauri } from '@tauri-apps/api/core'
+import {
+  AI_PROVIDER_OPTIONS,
+  DEFAULT_CLOUD_MODELS,
+  getConfiguredAiProvider,
+  getConfiguredCloudModel,
+  hasSavedCloudAiKey,
+  removeCloudAiKey,
+  saveCloudAiKey,
+  saveConfiguredAiProvider,
+  saveConfiguredCloudModel,
+  suggestWithCloudAi,
+} from './cloudAi'
+import type { AiProvider, CloudAiProvider } from './cloudAi'
 import { BOARD_THEMES, DEFAULT_MAP, NODE_COLORS, parseMindMapDocument } from './data'
 import {
   DEFAULT_LOCAL_MODEL,
@@ -166,9 +180,14 @@ function App() {
   const [suggestionsReady, setSuggestionsReady] = useState(false)
   const [suggestionError, setSuggestionError] = useState('')
   const [isSuggesting, setIsSuggesting] = useState(false)
+  const [aiProvider, setAiProvider] = useState<AiProvider>(getConfiguredAiProvider)
+  const [aiProviderDraft, setAiProviderDraft] = useState<AiProvider>(aiProvider)
   const [aiModel, setAiModel] = useState(getConfiguredModel)
-  const [aiModelDraft, setAiModelDraft] = useState(aiModel)
+  const [aiModelDraft, setAiModelDraft] = useState(() => aiProvider === 'ollama' ? aiModel : getConfiguredCloudModel(aiProvider))
+  const [cloudKeyDraft, setCloudKeyDraft] = useState('')
+  const [cloudKeySaved, setCloudKeySaved] = useState<boolean | null>(null)
   const [aiSettingsOpen, setAiSettingsOpen] = useState(false)
+  const [isSavingAiSettings, setIsSavingAiSettings] = useState(false)
   const [aiStatus, setAiStatus] = useState<LocalLlmStatus | null>(null)
   const [aiStatusBusy, setAiStatusBusy] = useState(false)
   const [aiDownloadBusy, setAiDownloadBusy] = useState(false)
@@ -317,10 +336,10 @@ function App() {
     setCanSave(true)
   }, [childrenByParent, graphItemsById, rootNode.id, rootNode.x])
 
-  const refreshAiStatus = useCallback(async (refresh = false) => {
+  const refreshAiStatus = useCallback(async (refresh = false, model = aiModel) => {
     setAiStatusBusy(true)
     try {
-      const status = await localLlmProvider.checkAvailability(aiModel, refresh)
+      const status = await localLlmProvider.checkAvailability(model, refresh)
       setAiStatus(status)
       setAiSettingsError(status.error ?? '')
       return status
@@ -334,8 +353,32 @@ function App() {
   }, [aiModel])
 
   useEffect(() => {
-    if (aiSettingsOpen) void refreshAiStatus()
-  }, [aiSettingsOpen, refreshAiStatus])
+    if (!aiSettingsOpen) return
+    if (aiProviderDraft === 'ollama') {
+      setCloudKeySaved(null)
+      void refreshAiStatus()
+      return
+    }
+
+    setAiStatus(null)
+    setCloudKeySaved(null)
+    if (!isTauri()) {
+      setCloudKeySaved(false)
+      return
+    }
+
+    let active = true
+    hasSavedCloudAiKey(aiProviderDraft)
+      .then((saved) => {
+        if (active) setCloudKeySaved(saved)
+      })
+      .catch((error: unknown) => {
+        if (!active) return
+        setCloudKeySaved(false)
+        setAiSettingsError(error instanceof Error ? error.message : String(error))
+      })
+    return () => { active = false }
+  }, [aiProviderDraft, aiSettingsOpen, refreshAiStatus])
 
   const requestSuggestions = useCallback(async () => {
     if (!selectedNode || selectedImage || isSuggesting) return
@@ -345,14 +388,6 @@ function App() {
     setSuggestionForNodeId(selectedNode.id)
     setSuggestionError('')
     try {
-      const status = await localLlmProvider.checkAvailability(aiModel)
-      setAiStatus(status)
-      if (!status.ollamaAvailable || !status.modelAvailable) {
-        setAiSettingsOpen(true)
-        setAiSettingsError(status.error ?? '')
-        return
-      }
-
       const children = (childrenByParent.get(selectedNode.id) ?? [])
         .filter((item): item is MindMapNode => 'text' in item)
         .map((node) => ({ text: node.text, note: node.note }))
@@ -365,26 +400,44 @@ function App() {
             : null,
         children,
       }
-      setSuggestions(await localLlmProvider.suggest(context, aiModel))
+      if (aiProvider === 'ollama') {
+        const status = await localLlmProvider.checkAvailability(aiModel)
+        setAiStatus(status)
+        if (!status.ollamaAvailable || !status.modelAvailable) {
+          setAiProviderDraft('ollama')
+          setAiModelDraft(aiModel)
+          setAiSettingsOpen(true)
+          setAiSettingsError(status.error ?? '')
+          return
+        }
+        setSuggestions(await localLlmProvider.suggest(context, aiModel))
+      } else {
+        setSuggestions(await suggestWithCloudAi(context, aiProvider, getConfiguredCloudModel(aiProvider)))
+      }
       setSuggestionsReady(true)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       setSuggestionError(message)
-      if (message.includes('is not available')) {
+      if (message.includes('is not available') || message.includes('No API key is saved')) {
+        setAiProviderDraft(aiProvider)
+        setAiModelDraft(aiProvider === 'ollama' ? aiModel : getConfiguredCloudModel(aiProvider))
+        setCloudKeyDraft('')
         setAiSettingsOpen(true)
-        await refreshAiStatus(true)
+        setAiSettingsError(message)
+        if (aiProvider === 'ollama') await refreshAiStatus(true)
       }
     } finally {
       setIsSuggesting(false)
     }
-  }, [aiModel, childrenByParent, isSuggesting, refreshAiStatus, selectedImage, selectedNode, selectedNodeParent])
+  }, [aiModel, aiProvider, childrenByParent, isSuggesting, refreshAiStatus, selectedImage, selectedNode, selectedNodeParent])
 
   async function downloadAiModel() {
     setAiDownloadBusy(true)
     setAiSettingsError('')
     try {
-      await localLlmProvider.downloadModel(aiModel)
-      await refreshAiStatus(true)
+      const model = aiModelDraft.trim()
+      await localLlmProvider.downloadModel(model)
+      await refreshAiStatus(true, model)
     } catch (error) {
       setAiSettingsError(error instanceof Error ? error.message : String(error))
     } finally {
@@ -392,17 +445,62 @@ function App() {
     }
   }
 
-  function applyAiModel() {
+  async function applyAiSettings() {
+    if (isSavingAiSettings) return
+    setIsSavingAiSettings(true)
+    setAiSettingsError('')
     try {
       const model = aiModelDraft.trim()
-      saveConfiguredModel(model)
-      setAiModel(model)
-      setAiModelDraft(model)
-      setAiStatus(null)
-      setAiSettingsError('')
+      if (aiProviderDraft === 'ollama') {
+        saveConfiguredModel(model)
+        saveConfiguredAiProvider('ollama')
+        setAiModel(model)
+        setAiProvider('ollama')
+        setAiModelDraft(model)
+        setAiStatus(null)
+      } else {
+        const provider: CloudAiProvider = aiProviderDraft
+        let keySaved = cloudKeySaved === true
+        if (cloudKeyDraft.trim()) {
+          await saveCloudAiKey(provider, cloudKeyDraft.trim())
+          keySaved = true
+        } else if (cloudKeySaved === null) {
+          keySaved = await hasSavedCloudAiKey(provider)
+        }
+        if (!keySaved) throw new Error(`Add an API key for ${AI_PROVIDER_OPTIONS.find((option) => option.id === provider)?.label ?? provider}.`)
+        const savedModel = saveConfiguredCloudModel(provider, model)
+        saveConfiguredAiProvider(provider)
+        setAiProvider(provider)
+        setAiModelDraft(savedModel)
+        setCloudKeySaved(true)
+        setCloudKeyDraft('')
+      }
     } catch (error) {
       setAiSettingsError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setIsSavingAiSettings(false)
     }
+  }
+
+  async function forgetCloudAiKey() {
+    if (aiProviderDraft === 'ollama') return
+    setIsSavingAiSettings(true)
+    setAiSettingsError('')
+    try {
+      await removeCloudAiKey(aiProviderDraft)
+      setCloudKeySaved(false)
+      setCloudKeyDraft('')
+    } catch (error) {
+      setAiSettingsError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setIsSavingAiSettings(false)
+    }
+  }
+
+  function closeAiSettings() {
+    setAiSettingsOpen(false)
+    setCloudKeyDraft('')
+    setAiSettingsError('')
   }
 
   const selectItem = useCallback((id: string) => {
@@ -518,6 +616,8 @@ function App() {
       } else if (event.key === 'Escape') {
         setSearch('')
         setThemeMenuOpen(false)
+        setAiSettingsOpen(false)
+        setCloudKeyDraft('')
       }
     }
     window.addEventListener('keydown', onKeyDown)
@@ -563,6 +663,8 @@ function App() {
   }
 
   const saveLabel = saveState === 'loading' ? 'Opening map' : saveState === 'saving' ? 'Saving' : saveState === 'error' ? 'Save issue' : 'Saved locally'
+  const activeAiProviderLabel = AI_PROVIDER_OPTIONS.find((option) => option.id === aiProvider)?.label ?? 'Ollama (local)'
+  const activeAiModel = aiProvider === 'ollama' ? aiModel : getConfiguredCloudModel(aiProvider)
 
   return (
     <main className="app-shell">
@@ -637,7 +739,14 @@ function App() {
               {isSuggesting ? <LoaderCircle size={15} className="spin" /> : <Sparkles size={15} />} <span>Suggest ideas</span>
             </button>
             <button className="primary-button" onClick={() => addIdea()}><Plus size={16} /> Add idea <kbd><Command size={11} /> ↵</kbd></button>
-            <button className="icon-button ai-settings-trigger" aria-label="AI settings" title="AI settings" onClick={() => { setAiModelDraft(aiModel); setAiSettingsOpen(true) }}><Settings2 size={17} /></button>
+            <button className="icon-button ai-settings-trigger" aria-label="AI settings" title="AI settings" onClick={() => {
+              setAiProviderDraft(aiProvider)
+              setAiModelDraft(activeAiModel)
+              setCloudKeyDraft('')
+              setCloudKeySaved(null)
+              setAiSettingsError('')
+              setAiSettingsOpen(true)
+            }}><Settings2 size={17} /></button>
             <button className="icon-button topbar-more" aria-label="More options" onClick={() => setNotice('Your map is saved locally and can be exported as a JSON file.')}><CircleHelp size={17} /></button>
           </div>
         </header>
@@ -964,7 +1073,12 @@ function App() {
                 </div>
                 <div className="ai-card">
                   <div className="ai-icon"><Sparkles size={15} /></div>
-                  <div className="ai-card-copy"><strong>Private, local brainstorming</strong><span>Uses {aiModel} through Ollama on this device.</span></div>
+                  <div className="ai-card-copy">
+                    <strong>{aiProvider === 'ollama' ? 'Private, local brainstorming' : `${activeAiProviderLabel} brainstorming`}</strong>
+                    <span>{aiProvider === 'ollama'
+                      ? `Uses ${activeAiModel} through Ollama on this device.`
+                      : `Selected idea context is sent to ${activeAiProviderLabel} when you request suggestions.`}</span>
+                  </div>
                 </div>
               </>
             ) : <p className="empty-inspector">Choose an idea to see its details.</p>}
@@ -995,54 +1109,123 @@ function App() {
       </section>
       {aiSettingsOpen && (
         <div className="ai-settings-backdrop" onMouseDown={(event) => {
-          if (event.target === event.currentTarget) setAiSettingsOpen(false)
+          if (event.target === event.currentTarget) closeAiSettings()
         }}>
           <section className="ai-settings-dialog" role="dialog" aria-modal="true" aria-labelledby="ai-settings-title">
             <div className="ai-settings-heading">
-              <div><span className="eyebrow">ON-DEVICE INFERENCE</span><h2 id="ai-settings-title">Local AI settings</h2></div>
-              <button className="icon-button" aria-label="Close AI settings" onClick={() => setAiSettingsOpen(false)}><X size={16} /></button>
+              <div><span className="eyebrow">AI PROVIDERS</span><h2 id="ai-settings-title">AI settings</h2></div>
+              <button className="icon-button" aria-label="Close AI settings" onClick={closeAiSettings}><X size={16} /></button>
             </div>
-            <label className="ai-model-field" htmlFor="ai-model-tag">OLLAMA MODEL TAG</label>
-            <div className="ai-model-entry">
-              <input id="ai-model-tag" value={aiModelDraft} maxLength={100} onChange={(event) => setAiModelDraft(event.target.value)} />
-              <button className="settings-action-button" onClick={applyAiModel} disabled={aiModelDraft.trim() === aiModel}>Save</button>
-            </div>
-            <p className="ai-settings-hint">Default: {DEFAULT_LOCAL_MODEL}. Change this to any model tag installed in your Ollama library.</p>
-            <div className={`ai-status-card ${aiStatus?.ollamaAvailable ? aiStatus.modelAvailable ? 'is-ready' : 'is-missing' : 'is-offline'}`} role="status">
-              {aiStatus?.ollamaAvailable && aiStatus.modelAvailable
-                ? <Check size={17} />
-                : <CircleAlert size={17} />}
-              <div>
-                <strong>
-                  {!aiStatus && !aiSettingsError ? 'Status not checked' :
-                    aiStatus?.ollamaAvailable ? aiStatus.modelAvailable ? 'Ollama and model ready' : 'Model not downloaded' :
-                      'Ollama unavailable'}
-                </strong>
-                <span>
-                  {aiStatus?.ollamaAvailable
-                    ? aiStatus.modelAvailable
-                      ? `${aiModel} is ready for local suggestions.`
-                      : `Download ${aiModel} to enable suggestions.`
-                    : aiStatus?.error ?? aiSettingsError ?? 'Check that Ollama is installed and running on this device.'}
-                </span>
-                {aiStatus?.cached && <small>Availability check cached for up to 30 seconds.</small>}
-                {!aiStatus?.ollamaAvailable && <a href="https://ollama.com/download" target="_blank" rel="noreferrer">Install Ollama</a>}
-              </div>
-            </div>
-            {aiSettingsError && aiStatus?.error !== aiSettingsError && <p className="ai-settings-error" role="alert">{aiSettingsError}</p>}
-            <div className="ai-settings-actions">
-              <button className="settings-action-button secondary" onClick={() => void refreshAiStatus(true)} disabled={aiStatusBusy || aiDownloadBusy}>
-                {aiStatusBusy ? <LoaderCircle size={14} className="spin" /> : <Settings2 size={14} />}
-                {aiStatusBusy ? 'Checking...' : 'Check status'}
+            <label className="ai-model-field" htmlFor="ai-provider">AI PROVIDER</label>
+            <select id="ai-provider" className="ai-settings-select" value={aiProviderDraft} onChange={(event) => {
+              const provider = AI_PROVIDER_OPTIONS.find((option) => option.id === event.currentTarget.value)?.id
+              if (!provider) return
+              setAiProviderDraft(provider)
+              setAiModelDraft(provider === 'ollama' ? aiModel : getConfiguredCloudModel(provider))
+              setCloudKeyDraft('')
+              setCloudKeySaved(null)
+              setAiSettingsError('')
+            }}>
+              {AI_PROVIDER_OPTIONS.map((option) => (
+                <option key={option.id} value={option.id} disabled={option.id !== 'ollama' && !isTauri()}>{option.label}</option>
+              ))}
+            </select>
+            {aiProviderDraft === 'ollama' ? (
+              <>
+                <label className="ai-model-field" htmlFor="ai-model-tag">OLLAMA MODEL TAG</label>
+                <div className="ai-model-entry">
+                  <input id="ai-model-tag" value={aiModelDraft} maxLength={100} onChange={(event) => setAiModelDraft(event.target.value)} />
+                </div>
+                <p className="ai-settings-hint">Default: {DEFAULT_LOCAL_MODEL}. Choose any model tag installed in Ollama.</p>
+                <div className={`ai-status-card ${aiStatus?.ollamaAvailable ? aiStatus.modelAvailable ? 'is-ready' : 'is-missing' : 'is-offline'}`} role="status">
+                  {aiStatus?.ollamaAvailable && aiStatus.modelAvailable
+                    ? <Check size={17} />
+                    : <CircleAlert size={17} />}
+                  <div>
+                    <strong>
+                      {!aiStatus && !aiSettingsError ? 'Status not checked' :
+                        aiStatus?.ollamaAvailable ? aiStatus.modelAvailable ? 'Ollama and model ready' : 'Model not downloaded' :
+                          'Ollama unavailable'}
+                    </strong>
+                    <span>
+                      {aiStatus?.ollamaAvailable
+                        ? aiStatus.modelAvailable
+                          ? `${aiStatus.model} is ready for local suggestions.`
+                          : `Download ${aiStatus.model} to enable suggestions.`
+                        : aiStatus?.error ?? aiSettingsError ?? 'Check that Ollama is installed and running on this device.'}
+                    </span>
+                    {aiStatus?.cached && <small>Availability check cached for up to 30 seconds.</small>}
+                    {!aiStatus?.ollamaAvailable && <a href="https://ollama.com/download" target="_blank" rel="noreferrer">Install Ollama</a>}
+                  </div>
+                </div>
+                <div className="ai-settings-actions">
+                  <button className="settings-action-button secondary" onClick={() => void refreshAiStatus(true, aiModelDraft.trim())} disabled={aiStatusBusy || aiDownloadBusy}>
+                    {aiStatusBusy ? <LoaderCircle size={14} className="spin" /> : <Settings2 size={14} />}
+                    {aiStatusBusy ? 'Checking...' : 'Check status'}
+                  </button>
+                  {aiStatus?.ollamaAvailable && !aiStatus.modelAvailable && (
+                    <button className="settings-action-button" onClick={() => void downloadAiModel()} disabled={aiDownloadBusy || aiStatusBusy}>
+                      {aiDownloadBusy ? <LoaderCircle size={14} className="spin" /> : <Download size={14} />}
+                      {aiDownloadBusy ? 'Downloading model...' : 'Download model'}
+                    </button>
+                  )}
+                </div>
+                <p className="ai-download-note">Models download only when requested and are never bundled with Kindred.</p>
+              </>
+            ) : (
+              <>
+                <label className="ai-model-field" htmlFor="ai-model-tag">MODEL ID</label>
+                <div className="ai-model-entry">
+                  <input id="ai-model-tag" value={aiModelDraft} maxLength={120} onChange={(event) => setAiModelDraft(event.target.value)} />
+                </div>
+                <p className="ai-settings-hint">Default: {DEFAULT_CLOUD_MODELS[aiProviderDraft]}. Use a model ID enabled for your provider account.</p>
+                <label className="ai-model-field" htmlFor="cloud-ai-key">API KEY</label>
+                <div className="ai-model-entry">
+                  <input
+                    id="cloud-ai-key"
+                    type="password"
+                    autoComplete="new-password"
+                    spellCheck={false}
+                    value={cloudKeyDraft}
+                    maxLength={512}
+                    disabled={!isTauri()}
+                    placeholder={cloudKeySaved ? 'Saved securely — leave blank to keep it' : 'Enter your provider API key'}
+                    onChange={(event) => setCloudKeyDraft(event.target.value)}
+                  />
+                </div>
+                <div className={`ai-status-card ${cloudKeySaved ? 'is-ready' : cloudKeySaved === false ? 'is-missing' : ''}`} role="status">
+                  {cloudKeySaved === null
+                    ? <LoaderCircle size={17} className="spin" />
+                    : cloudKeySaved ? <Check size={17} /> : <CircleAlert size={17} />}
+                  <div>
+                    <strong>{cloudKeySaved ? 'API key saved securely' : cloudKeySaved === false ? 'API key required' : 'Checking saved key'}</strong>
+                    <span>{cloudKeySaved
+                      ? 'The key is stored in your operating system credential manager, not in your map.'
+                      : cloudKeySaved === false
+                        ? 'Save an API key to enable online suggestions.'
+                        : 'Checking the operating system credential manager.'}</span>
+                  </div>
+                </div>
+                <p className="ai-privacy-note">
+                  When you request suggestions, Kindred sends the selected idea and its note, its parent and note, and its immediate child ideas and notes to {AI_PROVIDER_OPTIONS.find((option) => option.id === aiProviderDraft)?.label}. The provider may charge for API use and handle submitted data under its own policies.
+                </p>
+                {!isTauri() && <p className="ai-settings-hint">Online AI requires the desktop app so API keys can be kept in the operating system credential manager.</p>}
+                <div className="ai-settings-actions">
+                  {cloudKeySaved && (
+                    <button className="settings-action-button secondary" onClick={() => void forgetCloudAiKey()} disabled={isSavingAiSettings}>
+                      Forget API key
+                    </button>
+                  )}
+                </div>
+              </>
+            )}
+            {aiSettingsError && (aiProviderDraft !== 'ollama' || aiStatus?.error !== aiSettingsError) && <p className="ai-settings-error" role="alert">{aiSettingsError}</p>}
+            <div className="ai-settings-actions ai-settings-footer">
+              <button className="settings-action-button" onClick={() => void applyAiSettings()} disabled={isSavingAiSettings || (aiProviderDraft !== 'ollama' && !isTauri())}>
+                {isSavingAiSettings ? <LoaderCircle size={14} className="spin" /> : <Check size={14} />}
+                {isSavingAiSettings ? 'Saving...' : 'Save AI settings'}
               </button>
-              {aiStatus?.ollamaAvailable && !aiStatus.modelAvailable && (
-                <button className="settings-action-button" onClick={() => void downloadAiModel()} disabled={aiDownloadBusy || aiStatusBusy}>
-                  {aiDownloadBusy ? <LoaderCircle size={14} className="spin" /> : <Download size={14} />}
-                  {aiDownloadBusy ? 'Downloading model...' : 'Download model'}
-                </button>
-              )}
             </div>
-            <p className="ai-download-note">Models download only when requested and are never bundled with Kindred.</p>
           </section>
         </div>
       )}

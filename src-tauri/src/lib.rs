@@ -50,6 +50,40 @@ struct GeneratedSuggestions {
     suggestions: Vec<String>,
 }
 
+#[derive(Clone, Copy)]
+enum CloudAiProvider {
+    OpenAi,
+    Gemini,
+    Anthropic,
+}
+
+impl CloudAiProvider {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "openai" => Ok(Self::OpenAi),
+            "gemini" => Ok(Self::Gemini),
+            "anthropic" => Ok(Self::Anthropic),
+            _ => Err("Choose a supported online AI provider.".into()),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenAi => "openai",
+            Self::Gemini => "gemini",
+            Self::Anthropic => "anthropic",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::OpenAi => "OpenAI",
+            Self::Gemini => "Google Gemini",
+            Self::Anthropic => "Anthropic",
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct MindMapNode {
@@ -262,6 +296,63 @@ fn validate_model_tag(model: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn cloud_ai_key_entry(provider: CloudAiProvider) -> Result<keyring::Entry, String> {
+    keyring::Entry::new("com.kindred.mindmap.cloud-ai", provider.as_str()).map_err(|error| {
+        format!("Couldn't access the operating system's credential manager: {error}")
+    })
+}
+
+#[tauri::command]
+fn cloud_ai_key_saved(provider: String) -> Result<bool, String> {
+    let provider = CloudAiProvider::parse(&provider)?;
+    let entry = cloud_ai_key_entry(provider)?;
+    match entry.get_password() {
+        Ok(_) => Ok(true),
+        Err(keyring::Error::NoEntry) => Ok(false),
+        Err(error) => Err(format!("Couldn't read the saved API key: {error}")),
+    }
+}
+
+#[tauri::command]
+fn save_cloud_ai_key(provider: String, api_key: String) -> Result<(), String> {
+    let provider = CloudAiProvider::parse(&provider)?;
+    if api_key.is_empty()
+        || api_key.len() > 512
+        || api_key.trim() != api_key
+        || !api_key.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
+    {
+        return Err("Enter a valid API key without spaces or line breaks.".into());
+    }
+    cloud_ai_key_entry(provider)?
+        .set_password(&api_key)
+        .map_err(|error| {
+            format!(
+                "Couldn't save the API key in the operating system's credential manager: {error}"
+            )
+        })
+}
+
+#[tauri::command]
+fn remove_cloud_ai_key(provider: String) -> Result<(), String> {
+    let provider = CloudAiProvider::parse(&provider)?;
+    match cloud_ai_key_entry(provider)?.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(error) => Err(format!("Couldn't remove the saved API key: {error}")),
+    }
+}
+
+fn validate_cloud_model(model: &str) -> Result<(), String> {
+    if model.is_empty()
+        || model.len() > 120
+        || !model
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte))
+    {
+        return Err("Enter a valid model ID for the selected provider.".into());
+    }
+    Ok(())
+}
+
 fn ollama_error(error: reqwest::Error) -> String {
     format!(
         "Couldn't connect to Ollama at {OLLAMA_URL}. Install Ollama from https://ollama.com/download, start it, and try again. ({error})"
@@ -330,12 +421,13 @@ fn exceeds_utf16_length(value: &str, limit: usize) -> bool {
 fn parse_suggestions(response: &str) -> Result<Vec<String>, String> {
     if response.trim().is_empty() {
         return Err(
-            "Ollama returned an empty answer. Try again, or check that the configured model supports chat responses."
+            "The AI provider returned an empty answer. Try again, or check that the configured model supports chat responses."
                 .into(),
         );
     }
-    let generated: GeneratedSuggestions = serde_json::from_str(response)
-        .map_err(|error| format!("Ollama returned suggestions in an unexpected format: {error}"))?;
+    let generated: GeneratedSuggestions = serde_json::from_str(response).map_err(|error| {
+        format!("The AI provider returned suggestions in an unexpected format: {error}")
+    })?;
     let mut suggestions = Vec::new();
     for suggestion in generated.suggestions {
         let suggestion = suggestion.trim();
@@ -358,17 +450,14 @@ fn parse_suggestions(response: &str) -> Result<Vec<String>, String> {
         }
     }
     if suggestions.len() < 3 {
-        return Err("Ollama returned fewer than 3 concise idea suggestions. Try again.".into());
+        return Err(
+            "The AI provider returned fewer than 3 concise idea suggestions. Try again.".into(),
+        );
     }
     Ok(suggestions)
 }
 
-#[tauri::command]
-async fn suggest_ideas(
-    context: IdeaSuggestionContext,
-    model: String,
-) -> Result<Vec<String>, String> {
-    validate_model_tag(&model)?;
+fn validate_suggestion_context(context: &IdeaSuggestionContext) -> Result<(), String> {
     if context.children.len() > 1000
         || exceeds_utf16_length(&context.selected.text, 160)
         || exceeds_utf16_length(&context.selected.note, 500)
@@ -381,20 +470,13 @@ async fn suggest_ideas(
     {
         return Err("The selected idea contains invalid suggestion context.".into());
     }
+    Ok(())
+}
 
-    let client = ollama_client(Duration::from_secs(1800))?;
-    if !fetch_ollama_models(&client)
-        .await?
-        .iter()
-        .any(|available| available == &model)
-    {
-        return Err(format!(
-            "The Ollama model {model} is not available. Open AI settings to download it."
-        ));
-    }
-
+fn suggestion_prompt(context: &IdeaSuggestionContext) -> String {
     let parent = context
         .parent
+        .as_ref()
         .map(|node| format!("{}\nNote: {}", node.text, node.note))
         .unwrap_or_else(|| "None".to_owned());
     let children = if context.children.is_empty() {
@@ -407,10 +489,151 @@ async fn suggest_ideas(
             .collect::<Vec<_>>()
             .join("\n")
     };
-    let prompt = format!(
+    format!(
         "Generate 3 to 10 useful, distinct ideas that logically extend this mind-map branch. Write each suggestion as one complete, relevant sentence, aiming for 8 to 12 words. Keep the language clear and concise; don't add explanations, numbering, or repeat existing child ideas. Return only a JSON object with exactly this shape: {{\"suggestions\":[\"sentence 1\",\"sentence 2\"]}}. Selected idea:\n{}\nNote: {}\nParent idea:\n{}\nExisting children:\n{}",
         context.selected.text, context.selected.note, parent, children
-    );
+    )
+}
+
+fn cloud_response_text(provider: CloudAiProvider, response: &Value) -> Result<&str, String> {
+    let path = match provider {
+        CloudAiProvider::OpenAi => "/choices/0/message/content",
+        CloudAiProvider::Gemini => "/candidates/0/content/parts/0/text",
+        CloudAiProvider::Anthropic => "/content/0/text",
+    };
+    response
+        .pointer(path)
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("{} returned an unexpected response.", provider.label()))
+}
+
+fn cloud_http_error(
+    provider: CloudAiProvider,
+    status: reqwest::StatusCode,
+    body: &str,
+    api_key: &str,
+) -> String {
+    let detail = serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .pointer("/error/message")
+                .and_then(Value::as_str)
+                .or_else(|| value.pointer("/error").and_then(Value::as_str))
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| body.to_owned());
+    let detail = detail.replace(api_key, "[redacted]");
+    let detail: String = detail.chars().take(400).collect();
+    format!("{} returned HTTP {status}: {detail}", provider.label())
+}
+
+async fn request_cloud_suggestions(
+    provider: CloudAiProvider,
+    model: &str,
+    api_key: &str,
+    prompt: &str,
+) -> Result<Vec<String>, String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(90))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| format!("Couldn't configure the {} connection.", provider.label()))?;
+
+    let request = match provider {
+        CloudAiProvider::OpenAi => client
+            .post("https://api.openai.com/v1/chat/completions")
+            .bearer_auth(api_key)
+            .json(&json!({
+                "model": model,
+                "messages": [{ "role": "user", "content": prompt }],
+                "response_format": { "type": "json_object" },
+                "max_completion_tokens": 512
+            })),
+        CloudAiProvider::Gemini => client
+            .post(format!(
+                "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+            ))
+            .header("x-goog-api-key", api_key)
+            .json(&json!({
+                "contents": [{ "parts": [{ "text": prompt }] }],
+                "generationConfig": {
+                    "responseMimeType": "application/json",
+                    "maxOutputTokens": 512
+                }
+            })),
+        CloudAiProvider::Anthropic => client
+            .post("https://api.anthropic.com/v1/messages")
+            .header("x-api-key", api_key)
+            .header("anthropic-version", "2023-06-01")
+            .json(&json!({
+                "model": model,
+                "max_tokens": 512,
+                "messages": [{ "role": "user", "content": prompt }]
+            })),
+    };
+    let response = request.send().await.map_err(|_| {
+        format!(
+            "Couldn't connect to {}. Check your internet connection and try again.",
+            provider.label()
+        )
+    })?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|_| format!("{} returned an unreadable response.", provider.label()))?;
+    if !status.is_success() {
+        return Err(cloud_http_error(provider, status, &body, api_key));
+    }
+    let response: Value = serde_json::from_str(&body)
+        .map_err(|_| format!("{} returned an invalid response.", provider.label()))?;
+    parse_suggestions(cloud_response_text(provider, &response)?)
+}
+
+#[tauri::command]
+async fn suggest_cloud_ideas(
+    context: IdeaSuggestionContext,
+    provider: String,
+    model: String,
+) -> Result<Vec<String>, String> {
+    let provider = CloudAiProvider::parse(&provider)?;
+    validate_cloud_model(&model)?;
+    validate_suggestion_context(&context)?;
+    let entry = cloud_ai_key_entry(provider)?;
+    let api_key = match entry.get_password() {
+        Ok(api_key) => api_key,
+        Err(keyring::Error::NoEntry) => {
+            return Err(format!(
+                "No API key is saved for {}. Add one in AI settings.",
+                provider.label()
+            ))
+        }
+        Err(error) => return Err(format!("Couldn't read the saved API key: {error}")),
+    };
+    request_cloud_suggestions(provider, &model, &api_key, &suggestion_prompt(&context)).await
+}
+
+#[tauri::command]
+async fn suggest_ideas(
+    context: IdeaSuggestionContext,
+    model: String,
+) -> Result<Vec<String>, String> {
+    validate_model_tag(&model)?;
+    validate_suggestion_context(&context)?;
+
+    let client = ollama_client(Duration::from_secs(1800))?;
+    if !fetch_ollama_models(&client)
+        .await?
+        .iter()
+        .any(|available| available == &model)
+    {
+        return Err(format!(
+            "The Ollama model {model} is not available. Open AI settings to download it."
+        ));
+    }
+
+    let prompt = suggestion_prompt(&context);
     let response = client
         .post(format!("{OLLAMA_URL}/api/chat"))
         .json(&json!({
@@ -441,18 +664,32 @@ mod tests {
     fn suggestions_are_unique_and_limited_to_ten_short_titles() {
         let response = serde_json::json!({
             "suggestions": [
-                "First step", "Second step", "Third step", "FIRST STEP",
-                "A title that is much too long to be a concise node",
-                "Fourth idea", "Fifth idea", "Sixth idea", "Seventh idea",
-                "Eighth idea", "Ninth idea", "Tenth idea", "Eleventh idea"
+                "First idea should help you begin today",
+                "Second idea could make this plan easier",
+                "Third idea might add a little balance",
+                "FIRST IDEA SHOULD HELP YOU BEGIN TODAY",
+                "A title that contains fifteen distinct words and cannot be considered concise for a node",
+                "Fourth idea should give this plan more focus",
+                "Fifth idea may make the next step easier",
+                "Sixth idea could help everyone feel included",
+                "Seventh idea would create a better rhythm",
+                "Eighth idea might offer a useful perspective",
+                "Ninth idea can help keep things simple",
+                "Tenth idea should make this experience more enjoyable",
+                "Eleventh idea can help this plan feel complete"
             ]
         });
         let suggestions = parse_suggestions(&response.to_string()).unwrap();
 
         assert_eq!(suggestions.len(), 10);
-        assert!(!suggestions
-            .iter()
-            .any(|suggestion| suggestion == "FIRST STEP"));
+        assert_eq!(
+            suggestions
+                .iter()
+                .filter(|suggestion| suggestion
+                    .eq_ignore_ascii_case("First idea should help you begin today"))
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -469,6 +706,47 @@ mod tests {
 
         assert!(error.contains("empty answer"));
     }
+
+    #[test]
+    fn online_providers_extract_suggestion_text_from_their_response_shapes() {
+        assert_eq!(
+            super::cloud_response_text(
+                super::CloudAiProvider::OpenAi,
+                &serde_json::json!({ "choices": [{ "message": { "content": "openai" } }] })
+            )
+            .unwrap(),
+            "openai"
+        );
+        assert_eq!(
+            super::cloud_response_text(
+                super::CloudAiProvider::Gemini,
+                &serde_json::json!({ "candidates": [{ "content": { "parts": [{ "text": "gemini" }] } }] })
+            )
+            .unwrap(),
+            "gemini"
+        );
+        assert_eq!(
+            super::cloud_response_text(
+                super::CloudAiProvider::Anthropic,
+                &serde_json::json!({ "content": [{ "type": "text", "text": "anthropic" }] })
+            )
+            .unwrap(),
+            "anthropic"
+        );
+    }
+
+    #[test]
+    fn cloud_provider_error_messages_redact_api_keys() {
+        let error = super::cloud_http_error(
+            super::CloudAiProvider::OpenAi,
+            reqwest::StatusCode::UNAUTHORIZED,
+            r#"{"error":{"message":"Rejected key sk-secret"}}"#,
+            "sk-secret",
+        );
+
+        assert!(error.contains("[redacted]"));
+        assert!(!error.contains("sk-secret"));
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -479,7 +757,11 @@ pub fn run() {
             save_map,
             ollama_models,
             download_ollama_model,
-            suggest_ideas
+            suggest_ideas,
+            cloud_ai_key_saved,
+            save_cloud_ai_key,
+            remove_cloud_ai_key,
+            suggest_cloud_ideas
         ])
         .run(tauri::generate_context!())
         .expect("error while running Kindred");
