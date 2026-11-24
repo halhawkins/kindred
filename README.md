@@ -1,7 +1,7 @@
 # Kindred
 
 Kindred is a local-first mind-mapping desktop app. The React and TypeScript interface runs inside a Tauri window, and its Rust backend stores the current map in the operating system's application-data directory. In a regular browser, the app uses local storage instead.
-
+![Example Image](./public/kindred-screen.png) ![](./public/kindred-screen.png width="100" height="100")
 ## Run the desktop app
 
 Install the prerequisites for [Tauri 2](https://v2.tauri.app/start/prerequisites/), then run:

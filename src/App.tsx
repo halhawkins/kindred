@@ -640,6 +640,7 @@ function App() {
             }}
             onPointerDown={(event) => {
               if (event.button !== 0 || (event.target as Element).closest('.mind-node, .board-image, button, input, textarea, .notice')) return
+              event.preventDefault()
               const svg = canvasSvgRef.current
               if (!svg) return
               const position = pointerToCanvas(svg, event.clientX, event.clientY)
