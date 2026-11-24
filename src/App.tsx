@@ -41,7 +41,9 @@ const NODE_HEIGHT = 62
 const MAX_IMAGE_FILE_SIZE = 15 * 1024 * 1024
 const MAX_IMAGE_DATA_SIZE = 2_000_000
 
-type DragTarget = { type: 'node' | 'image'; id: string; offsetX: number; offsetY: number }
+type DragTarget =
+  | { type: 'node' | 'image'; id: string; offsetX: number; offsetY: number }
+  | { type: 'reparent'; id: string; parentId: string; branchIds: Set<string> }
 
 function nodeWidth(node: MindMapNode) {
   return node.parentId === null ? ROOT_WIDTH : NODE_WIDTH
@@ -53,6 +55,18 @@ function itemWidth(item: MindMapNode | MindMapImage) {
 
 function itemLabel(item: MindMapNode | MindMapImage) {
   return 'text' in item ? item.text : item.name
+}
+
+function getBranchIds(id: string, childrenByParent: ReadonlyMap<string, (MindMapNode | MindMapImage)[]>) {
+  const branchIds = new Set<string>()
+  const pending = [id]
+  while (pending.length) {
+    const currentId = pending.pop()!
+    if (branchIds.has(currentId)) continue
+    branchIds.add(currentId)
+    for (const child of childrenByParent.get(currentId) ?? []) pending.push(child.id)
+  }
+  return branchIds
 }
 
 function wrapText(text: string, limit: number) {
@@ -144,9 +158,12 @@ function App() {
   const [canSave, setCanSave] = useState(false)
   const [draggingId, setDraggingId] = useState<string | null>(null)
   const [isPanning, setIsPanning] = useState(false)
+  const [reparentingId, setReparentingId] = useState<string | null>(null)
+  const [reparentTargetId, setReparentTargetId] = useState<string | null>(null)
   const [themeMenuOpen, setThemeMenuOpen] = useState(false)
   const [suggestions, setSuggestions] = useState<string[]>([])
   const [suggestionForNodeId, setSuggestionForNodeId] = useState<string | null>(null)
+  const [suggestionsReady, setSuggestionsReady] = useState(false)
   const [suggestionError, setSuggestionError] = useState('')
   const [isSuggesting, setIsSuggesting] = useState(false)
   const [aiModel, setAiModel] = useState(getConfiguredModel)
@@ -237,8 +254,8 @@ function App() {
     }))
   }, [])
 
-  const addIdea = useCallback((text = 'New idea') => {
-    const parent = selectedImage ?? selectedNode
+  const addIdea = useCallback((text = 'New idea', parentOverride?: MindMapNode | MindMapImage) => {
+    const parent = parentOverride ?? selectedImage ?? selectedNode
     if (!parent || !rootNode) return
     const siblings = childrenByParent.get(parent.id) ?? []
     const direction = parent.id === rootNode.id
@@ -265,6 +282,41 @@ function App() {
     setNotice('')
   }, [childrenByParent, rootNode, selectedImage, selectedNode])
 
+  const reparentBranch = useCallback((childId: string, parentId: string) => {
+    const child = graphItemsById.get(childId)
+    const parent = graphItemsById.get(parentId)
+    if (!child || !parent || child.parentId === null || child.parentId === parent.id) return
+
+    const branchIds = getBranchIds(childId, childrenByParent)
+    if (branchIds.has(parentId)) return
+
+    const siblings = childrenByParent.get(parent.id) ?? []
+    const direction = parent.id === rootNode.id
+      ? (siblings.length % 2 === 0 ? 1 : -1)
+      : parent.x >= rootNode.x ? 1 : -1
+    const horizontalGap = parent.id === rootNode.id
+      ? 252
+      : itemWidth(parent) / 2 + itemWidth(child) / 2 + 51
+    const offsetX = parent.x + direction * horizontalGap - child.x
+    const offsetY = parent.y + (siblings.length - (siblings.length - 1) / 2) * 102 - child.y
+
+    setDocument((current) => ({
+      ...current,
+      nodes: current.nodes.map((node) => branchIds.has(node.id)
+        ? {
+          ...node,
+          parentId: node.id === childId ? parent.id : node.parentId,
+          x: node.x + offsetX,
+          y: node.y + offsetY,
+        }
+        : node),
+      images: current.images.map((image) => branchIds.has(image.id)
+        ? { ...image, x: image.x + offsetX, y: image.y + offsetY }
+        : image),
+    }))
+    setCanSave(true)
+  }, [childrenByParent, graphItemsById, rootNode.id, rootNode.x])
+
   const refreshAiStatus = useCallback(async (refresh = false) => {
     setAiStatusBusy(true)
     try {
@@ -289,6 +341,7 @@ function App() {
     if (!selectedNode || selectedImage || isSuggesting) return
     setIsSuggesting(true)
     setSuggestions([])
+    setSuggestionsReady(false)
     setSuggestionForNodeId(selectedNode.id)
     setSuggestionError('')
     try {
@@ -313,6 +366,7 @@ function App() {
         children,
       }
       setSuggestions(await localLlmProvider.suggest(context, aiModel))
+      setSuggestionsReady(true)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       setSuggestionError(message)
@@ -546,7 +600,7 @@ function App() {
 
         <div className="sidebar-actions">
           <div className="sidebar-section-heading"><span>QUICK ACTIONS</span></div>
-          <button className="sidebar-action" onClick={() => addIdea()} title="Add a thought"><Plus size={16} /><span className="sidebar-action-label">Add a thought</span><kbd>⌘ ↵</kbd></button>
+          <button className="sidebar-action" onClick={() => addIdea()} title="Add a thought"><Plus size={16} /><span className="sidebar-action-label">Add a thought</span><kbd>Ctrl ↵</kbd></button>
           <button className="sidebar-action" onClick={() => imageInputRef.current?.click()} title="Add an image"><ImagePlus size={16} /><span className="sidebar-action-label">Add an image</span></button>
           <button className="sidebar-action" onClick={startNewDocument} title="Start a new document"><FilePlus2 size={16} /><span className="sidebar-action-label">New document</span></button>
           <button className="sidebar-action" onClick={() => importRef.current?.click()} title="Import a map"><ArrowUpFromLine size={16} /><span className="sidebar-action-label">Import a map</span></button>
@@ -632,7 +686,7 @@ function App() {
         <div className="workspace-body">
           <div
             ref={canvasWrapRef}
-            className={`canvas-wrap theme-${document.theme} ${isPanning ? 'is-panning' : ''}`}
+            className={`canvas-wrap theme-${document.theme} ${isPanning ? 'is-panning' : ''} ${reparentingId ? 'is-reparenting' : ''}`}
             style={{
               backgroundColor: activeTheme.background,
               backgroundImage: `radial-gradient(circle, ${activeTheme.grid} 1px, transparent 1px)`,
@@ -660,6 +714,14 @@ function App() {
                 return
               }
               if (dragRef.current) {
+                if (dragRef.current.type === 'reparent') {
+                  const targetId = window.document.elementFromPoint(event.clientX, event.clientY)
+                    ?.closest<SVGGElement>('.mind-node')?.dataset.nodeId ?? null
+                  setReparentTargetId(targetId && targetId !== dragRef.current.parentId && !dragRef.current.branchIds.has(targetId)
+                    ? targetId
+                    : null)
+                  return
+                }
                 const position = pointerToMap(svg, event.clientX, event.clientY, zoom, pan)
                 const drag = dragRef.current
                 const update = { x: position.x + drag.offsetX, y: position.y + drag.offsetY }
@@ -667,17 +729,39 @@ function App() {
                 else updateImage(drag.id, update)
               }
             }}
-            onPointerUp={() => { dragRef.current = null; panRef.current = null; setDraggingId(null); setIsPanning(false) }}
-            onPointerCancel={() => { dragRef.current = null; panRef.current = null; setDraggingId(null); setIsPanning(false) }}
+            onPointerUp={(event) => {
+              const drag = dragRef.current
+              if (drag?.type === 'reparent') {
+                const targetId = window.document.elementFromPoint(event.clientX, event.clientY)
+                  ?.closest<SVGGElement>('.mind-node')?.dataset.nodeId
+                if (targetId && targetId !== drag.parentId && !drag.branchIds.has(targetId)) {
+                  reparentBranch(drag.id, targetId)
+                }
+              }
+              dragRef.current = null
+              panRef.current = null
+              setDraggingId(null)
+              setIsPanning(false)
+              setReparentingId(null)
+              setReparentTargetId(null)
+            }}
+            onPointerCancel={() => {
+              dragRef.current = null
+              panRef.current = null
+              setDraggingId(null)
+              setIsPanning(false)
+              setReparentingId(null)
+              setReparentTargetId(null)
+            }}
           >
             <div className="canvas-caption"><span className="caption-dot" /> A little space to think</div>
             {notice && <div className={`notice ${saveState === 'error' ? 'notice-error' : ''}`} role="status">{notice}<button onClick={() => setNotice('')} aria-label="Dismiss message"><X size={14} /></button></div>}
             <svg
               ref={canvasSvgRef}
-              className={`mindmap-canvas ${isPanning ? 'is-panning' : ''}`}
+              className={`mindmap-canvas ${isPanning ? 'is-panning' : ''} ${reparentingId ? 'is-reparenting' : ''}`}
               viewBox={`0 0 ${VIEW_WIDTH} ${VIEW_HEIGHT}`}
               role="img"
-              aria-label="Interactive mind map. Drag the background to move around, or drag an idea to rearrange it."
+              aria-label="Interactive mind map. Drag the background to move around, drag an idea to reposition it, or drag an idea's connector onto another idea to reparent its branch."
             >
               <defs>
                 <pattern id="dot-grid" width="28" height="28" patternUnits="userSpaceOnUse">
@@ -702,7 +786,35 @@ function App() {
                     const endX = item.x - direction * (itemWidth(item) / 2 - 5)
                     const curve = Math.max(55, Math.abs(endX - startX) * 0.42)
                     const dimmed = matchingIds !== null && !matchingIds.has(item.id) && !matchingIds.has(parent.id)
-                    return <path key={`edge-${item.id}`} className={`connection ${dimmed ? 'is-dimmed' : ''}`} style={{ stroke: activeTheme.connection }} d={`M ${startX} ${parent.y} C ${startX + direction * curve} ${parent.y}, ${endX - direction * curve} ${item.y}, ${endX} ${item.y}`} />
+                    const path = `M ${startX} ${parent.y} C ${startX + direction * curve} ${parent.y}, ${endX - direction * curve} ${item.y}, ${endX} ${item.y}`
+                    return (
+                      <g key={`edge-${item.id}`}>
+                        <path className={`connection ${dimmed ? 'is-dimmed' : ''} ${reparentingId === item.id ? 'is-reparenting' : ''}`} style={{ stroke: activeTheme.connection }} d={path} />
+                        {'text' in item && (
+                          <path
+                            className="connection-hit-area"
+                            d={path}
+                            aria-label={`Drag to change the parent of ${item.text}`}
+                            onPointerDown={(event) => {
+                              if (event.button !== 0) return
+                              event.stopPropagation()
+                              event.preventDefault()
+                              dragRef.current = {
+                                type: 'reparent',
+                                id: item.id,
+                                parentId: item.parentId!,
+                                branchIds: getBranchIds(item.id, childrenByParent),
+                              }
+                              setReparentingId(item.id)
+                              setReparentTargetId(null)
+                              canvasWrapRef.current?.setPointerCapture(event.pointerId)
+                            }}
+                          >
+                            <title>Drag this line onto an idea to change its parent</title>
+                          </path>
+                        )}
+                      </g>
+                    )
                   })}
                 </g>
                 {(document.images ?? []).map((image, index) => (
@@ -742,7 +854,8 @@ function App() {
                   return (
                     <g
                       key={node.id}
-                      className={`mind-node ${selected ? 'is-active' : ''} ${root ? 'is-root' : ''} ${dimmed ? 'is-dimmed' : ''} ${draggingId === node.id ? 'is-dragging' : ''}`}
+                      className={`mind-node ${selected ? 'is-active' : ''} ${root ? 'is-root' : ''} ${dimmed ? 'is-dimmed' : ''} ${draggingId === node.id ? 'is-dragging' : ''} ${reparentTargetId === node.id ? 'is-drop-target' : ''}`}
+                      data-node-id={node.id}
                       transform={`translate(${node.x} ${node.y})`}
                       onPointerDown={(event) => {
                         if (event.button !== 0) return
@@ -774,9 +887,9 @@ function App() {
               </g>
             </svg>
             <div className="canvas-footer">
-              <span><span className="footer-key">⌘</span> <span className="footer-key">↵</span> add an idea</span>
+              <span><span className="footer-key">Ctrl</span> <span className="footer-key">↵</span> add an idea</span>
               <span className="footer-separator">·</span>
-              <span>Drag to rearrange · click to explore</span>
+              <span>Drag ideas to move · drag a connector to reparent</span>
               <span className="canvas-idea-count">{document.nodes.length} ideas{document.images.length ? ` · ${document.images.length} images` : ''}</span>
             </div>
           </div>
@@ -841,21 +954,6 @@ function App() {
                   {isSuggesting ? <LoaderCircle size={15} className="spin" /> : <Sparkles size={15} />}
                   {isSuggesting ? 'Generating suggestions...' : 'Suggest ideas'}
                 </button>
-                {suggestionForNodeId === selectedNode.id && (suggestionError || suggestions.length > 0) && (
-                  <div className="suggestion-results" aria-live="polite">
-                    {suggestionError && <p className="suggestion-error" role="alert">{suggestionError}</p>}
-                    {suggestions.length > 0 && (
-                      <>
-                        <span className="suggestion-heading">CHOOSE IDEAS TO ADD</span>
-                        {suggestions.map((suggestion) => (
-                          <button key={suggestion} className="suggestion-option" onClick={() => addIdea(suggestion)}>
-                            <Plus size={13} /><span>{suggestion}</span>
-                          </button>
-                        ))}
-                      </>
-                    )}
-                  </div>
-                )}
                 {selectedNode.parentId && <button className="delete-branch-button" onClick={deleteIdea}><Trash2 size={15} /> Remove this idea & its branches</button>}
                 <div className="parent-context">
                   <span className="parent-label">CONNECTED TO</span>
@@ -870,6 +968,28 @@ function App() {
                 </div>
               </>
             ) : <p className="empty-inspector">Choose an idea to see its details.</p>}
+            {suggestionForNodeId && (suggestionError || suggestionsReady) && (
+              <div className="suggestion-results" aria-live="polite">
+                {suggestionError && <p className="suggestion-error" role="alert">{suggestionError}</p>}
+                {suggestionsReady && (
+                  <>
+                    <span className="suggestion-heading">CHOOSE IDEAS TO ADD</span>
+                    {suggestions.length > 0
+                      ? suggestions.map((suggestion, index) => (
+                        <button key={`${suggestion}-${index}`} className="suggestion-option" onClick={() => {
+                          const parent = document.nodes.find((node) => node.id === suggestionForNodeId) ?? selectedNode
+                          if (!parent) return
+                          addIdea(suggestion, parent)
+                          setSuggestions((current) => current.filter((_, itemIndex) => itemIndex !== index))
+                        }}>
+                          <Plus size={13} /><span>{suggestion}</span>
+                        </button>
+                      ))
+                      : <p className="suggestion-empty">All suggestions have been added.</p>}
+                  </>
+                )}
+              </div>
+            )}
           </aside>
         </div>
       </section>
