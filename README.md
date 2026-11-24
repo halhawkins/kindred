@@ -19,6 +19,6 @@ Add connected ideas, write notes, change colors, search the map, and adjust the 
 
 Changes are saved locally as you work. Use Import and Export to move a map as a JSON file. Choose **New document** to replace the current map with a fresh one; the app asks for confirmation first.
 
-Select an idea and choose **Suggest ideas** to get 3–10 concise child-node suggestions from a local model. Suggestions use the selected idea, its parent, and its immediate child ideas as context; nothing is added until you choose a suggestion.
+If Ollama is installed you may optionally select an idea and choose **Suggest ideas** to get 3–10 concise child-node suggestions from a local model. Suggestions use the selected idea, its parent, and its immediate child ideas as context; nothing is added until you choose a suggestion.
 
 Suggestions run through the local LLM provider interface, currently backed by Ollama. Ollama must be installed and running on this device. Open **AI settings** to check Ollama and model status or configure a model tag. Kindred defaults to `qwen2.5:3b`; if it is missing, choose **Download model** to fetch it through Ollama. Models are downloaded only on request and are never included in the installer. AI features are optional and do not send map content to cloud APIs.
